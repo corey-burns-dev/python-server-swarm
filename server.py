@@ -2,7 +2,9 @@
 import os
 import json
 import requests
-from flask import Flask, request
+import aiohttp
+import subprocess
+from flask import Flask, request, send_from_directory
 from flask_socketio import SocketIO, emit, join_room, leave_room
 from collections import defaultdict
 
@@ -22,10 +24,62 @@ online_users = defaultdict(set)       # room → set of usernames
 socket_data = {}                      # sid → {room, user}
 
 # ----------------------------------------------------------------------
+# 7TV Emotes
+# ----------------------------------------------------------------------
+SEVENTV_EMOTES = {}  # name -> id
+
+def load_7tv_emotes():
+    global SEVENTV_EMOTES
+    try:
+        with open('emotes/emotes.json', 'r') as f:
+            SEVENTV_EMOTES = json.load(f)
+        print(f"Loaded {len(SEVENTV_EMOTES)} emotes from local file")
+    except FileNotFoundError:
+        print("emotes.json not found, using fallback")
+        SEVENTV_EMOTES = {
+            "PogChamp": "01FAGRADQ00008E6R5BC5KRVKP.webp",
+            "Kappa": "01FAGRAEQ00008E6R5BC5KRVKR.webp",
+            "LUL": "01FAGRADQ00008E6R5BC5KRVKR.webp",
+            "OMEGALUL": "01FAGRADQ00008E6R5BC5KRVKS.webp",
+            "PepeLaugh": "01FAGRADQ00008E6R5BC5KRVKT.webp",
+            "monkaS": "01FAGRADQ00008E6R5BC5KRVKU.webp"
+        }
+    except Exception as e:
+        print(f"Error loading emotes: {e}")
+        SEVENTV_EMOTES = {
+            "PogChamp": "01FAGRADQ00008E6R5BC5KRVKP.webp",
+            "Kappa": "01FAGRAEQ00008E6R5BC5KRVKR.webp",
+            "LUL": "01FAGRADQ00008E6R5BC5KRVKR.webp",
+            "OMEGALUL": "01FAGRADQ00008E6R5BC5KRVKS.webp",
+            "PepeLaugh": "01FAGRADQ00008E6R5BC5KRVKT.webp",
+            "monkaS": "01FAGRADQ00008E6R5BC5KRVKU.webp"
+        }
+
+    # Run download-7tv.js to download emotes locally
+    try:
+        print("Running download-7tv.js...")
+        subprocess.run(['node', 'download-7tv.js'], check=True, timeout=60)
+        print("Emotes downloaded successfully")
+        # Reload after download
+        try:
+            with open('emotes/emotes.json', 'r') as f:
+                SEVENTV_EMOTES = json.load(f)
+            print(f"Reloaded {len(SEVENTV_EMOTES)} emotes after download")
+        except:
+            pass
+    except subprocess.CalledProcessError as e:
+        print(f"download-7tv.js failed: {e}")
+    except FileNotFoundError:
+        print("download-7tv.js not found, skipping download")
+    except subprocess.TimeoutExpired:
+        print("download-7tv.js timed out")
+
+# ----------------------------------------------------------------------
 @socketio.on("connect")
 def on_connect():
     sid = request.sid
     print(f"[CONNECT] Client {sid}")
+    emit("emotes", SEVENTV_EMOTES)
     emit("status", {"message": "Connected to server."})
 
 # ----------------------------------------------------------------------
@@ -44,8 +98,15 @@ def handle_join(data):
     online_users[room].add(user)
 
     print(f"[JOIN] {user} → {room}")
+    # Tell everyone a user joined
     emit("user_joined", {"user": user}, room=room)
     emit("status", {"message": f"{user} joined"}, room=room)
+    # Send the current user list to the newly-joined client so they see existing users (including bots)
+    try:
+        emit("user_list", {"users": list(online_users[room])}, to=sid)
+    except Exception:
+        # fallback: emit without explicit target
+        emit("user_list", {"users": list(online_users[room])})
 
 # ----------------------------------------------------------------------
 @socketio.on("disconnect")
@@ -81,6 +142,7 @@ def handle_typing(data):
     sid = request.sid
     info = socket_data.get(sid)
     if info:
+        # Broadcast to **everyone except the typer** (they already show their own)
         emit("typing", {"user": info["user"]}, room=info["room"], include_self=False)
 
 @socketio.on("stop_typing")
@@ -91,24 +153,26 @@ def handle_stop_typing(data):
         emit("stop_typing", {"user": info["user"]}, room=info["room"], include_self=False)
 
 # ----------------------------------------------------------------------
-# HUMAN MESSAGES → LM + STREAM TO ALL
-# ----------------------------------------------------------------------
 @socketio.on("message")
-def on_human_message(data):
+def on_message(data):
     sid = request.sid
     user_text = data.get("text", "").strip()
     room = data.get("room")
     user = data.get("user")
 
+    # Validate session
     info = socket_data.get(sid)
-    if not info or info["room"] != room or info["user"] != user or not user_text:
+    if not info or info["room"] != room or info["user"] != user:
         emit("error", {"message": "Invalid session"}, to=sid)
         return
+    if not user_text:
+        return
 
-    # Append to history
+    # Append user message
     messages = conversations.setdefault(sid, [{"role": "system", "content": "You are a helpful assistant."}])
     messages.append({"role": "user", "content": user_text})
 
+    # Call LM with streaming
     payload = {
         "model": MODEL,
         "messages": messages,
@@ -131,23 +195,28 @@ def on_human_message(data):
                     delta = chunk["choices"][0]["delta"].get("content", "")
                     if delta:
                         full_reply.append(delta)
+                        # STREAM TO **EVERYONE IN THE ROOM** (not just sender)
                         emit("stream", {"token": delta}, room=room)
                 except Exception as e:
                     print(f"Stream parse error: {e}")
 
-            reply_text = "".join(full_reply).strip() or "(no response)"
+            reply_text = "".join(full_reply).strip()
+            if not reply_text:
+                reply_text = "(no response)"
+
             messages.append({"role": "assistant", "content": reply_text})
 
+            # Signal end of streaming
             emit("done", room=room)
+
+            # BROADCAST FINAL MESSAGE TO WHOLE ROOM
             emit("message", {"user": "AI Assistant", "text": reply_text}, room=room)
 
     except requests.RequestException as e:
-        error_msg = f"LM failed: {e}"
+        error_msg = f"LM request failed: {e}"
         print(error_msg)
         emit("error", {"message": error_msg}, to=sid)
 
-# ----------------------------------------------------------------------
-# BOT MESSAGES → JUST BROADCAST (NO LM)
 # ----------------------------------------------------------------------
 @socketio.on("bot_message")
 def on_bot_message(data):
@@ -158,10 +227,30 @@ def on_bot_message(data):
     if not user or not text or not room:
         return
 
-    print(f"[BOT] {user}: {text}")
+    # Broadcast to room without calling LM
     emit("message", {"user": user, "text": text}, room=room)
 
 # ----------------------------------------------------------------------
+@app.route("/")
+def index():
+    return send_from_directory(".", "index.html")
+
+# ----------------------------------------------------------------------
+# Emote serving
+# ----------------------------------------------------------------------
+@app.route('/emotes/<path:filename>')
+def serve_emote(filename):
+    return send_from_directory('emotes', filename)
+
+# ----------------------------------------------------------------------
+@app.route('/socket.io.js')
+def serve_socketio():
+    response = send_from_directory('static', 'socket.io.min.js')
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    return response
+
+# ----------------------------------------------------------------------
 if __name__ == "__main__":
+    load_7tv_emotes()
     print("Starting Flask-SocketIO server on http://0.0.0.0:5000")
     socketio.run(app, host="0.0.0.0", port=5000)

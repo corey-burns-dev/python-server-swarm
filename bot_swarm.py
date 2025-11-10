@@ -7,6 +7,7 @@ import time
 import aiohttp
 from faker import Faker
 import socketio
+import re  # for emote parsing
 
 # ----------------------------------------------------------------------
 # CONFIG
@@ -17,13 +18,11 @@ MODEL      = os.getenv("LM_MODEL", "lmstudio-community/Meta-Llama-3-8B-Instruct"
 
 ROOM_ID    = "test-room-123"
 NUM_BOTS   = 12
-MAX_TOKENS = 60  # Reduced for shorter responses
+MAX_TOKENS = 60
 TEMPERATURE = 0.85
 
-# ----------------------------------------------------------------------
 fake = Faker()
 
-# ----------------------------------------------------------------------
 PERSONAS = [
     "Alex, 25, software dev from Kitchener, loves sci-fi and memes",
     "Sam, 19, university student, obsessed with K-pop and food pics",
@@ -48,16 +47,59 @@ PERSONAS = [
 ]
 
 # ----------------------------------------------------------------------
+# 7TV Emotes
+# ----------------------------------------------------------------------
+SEVENTV_EMOTES = {}  # name -> id
+
+async def load_7tv_emotes():
+    global SEVENTV_EMOTES
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get("https://7tv.io/v3/emote-sets/global") as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if "emotes" in data:
+                        for emote in data["emotes"]:
+                            if "name" in emote and "id" in emote:
+                                SEVENTV_EMOTES[emote["name"]] = emote["id"]
+                    print(f"Loaded {len(SEVENTV_EMOTES)} 7TV emotes with IDs")
+                else:
+                    print("Failed to load 7TV emotes")
+                    # Fallback
+                    SEVENTV_EMOTES = {
+                        "PogChamp": "01FAGRADQ00008E6R5BC5KRVKP",
+                        "Kappa": "01FAGRAEQ00008E6R5BC5KRVKR",
+                        "LUL": "01FAGRADQ00008E6R5BC5KRVKR",
+                        "OMEGALUL": "01FAGRADQ00008E6R5BC5KRVKS",
+                        "PepeLaugh": "01FAGRADQ00008E6R5BC5KRVKT",
+                        "monkaS": "01FAGRADQ00008E6R5BC5KRVKU"
+                    }
+    except Exception as e:
+        print(f"Error loading 7TV emotes: {e}")
+        SEVENTV_EMOTES = {
+            "PogChamp": "01FAGRADQ00008E6R5BC5KRVKP",
+            "Kappa": "01FAGRAEQ00008E6R5BC5KRVKR",
+            "LUL": "01FAGRADQ00008E6R5BC5KRVKR",
+            "OMEGALUL": "01FAGRADQ00008E6R5BC5KRVKS",
+            "PepeLaugh": "01FAGRADQ00008E6R5BC5KRVKT",
+            "monkaS": "01FAGRADQ00008E6R5BC5KRVKU"
+        }
+
+def get_emote_url(name):
+    """Get 7TV CDN URL for emote (1x size for chat)."""
+    # Static ID for global emotes (or fetch dynamically if needed)
+    return f"https://static-cdn.jtvnw.net/emoticons/v2/{name}/default/dark/1.0"
+
+# ----------------------------------------------------------------------
 class ChatBot:
     def __init__(self, sid: str, name: str, persona: str):
         self.sid = sid
         self.name = name
         self.persona = persona
         self.history = []
-        self.speed = random.uniform(1.5, 4.0)   # Slightly faster
+        self.speed = random.uniform(3.0, 8.0)  # Slower responses
         self.bot_sio = None
 
-    # ------------------------------------------------------------------
     async def _call_lm(self, prompt: str) -> str:
         payload = {
             "model": MODEL,
@@ -82,7 +124,6 @@ class ChatBot:
             except Exception as e:
                 return f"(LM failed: {e})"
 
-    # ------------------------------------------------------------------
     async def send(self, text: str):
         print(f"{self.name} → {text}")
         if self.bot_sio and self.bot_sio.connected:
@@ -92,7 +133,6 @@ class ChatBot:
                 "room": ROOM_ID
             })
 
-    # ------------------------------------------------------------------
     async def think_and_reply(self, room_history: list):
         recent = "\n".join(f"{m['user']}: {m['text']}" for m in room_history[-8:])
         prompt = f"""Recent chat:
@@ -100,13 +140,10 @@ class ChatBot:
 
 Reply as {self.name} (you are {self.persona}). Chat like in a live Twitch/Kick stream: keep responses VERY short (1 sentence max), use lots of emojis, abbreviations, be casual and reactive. No walls of text!"""
 
-        # Chance for quick reactions instead of full responses
-        if random.random() < 0.5:  # Back to 50%
-            reactions = [
-                "lol", "😂", "nice!", "🤔", "agree", "👍", "omg", "😮", "cool", "haha",
-                "wtf", "🤣", "true", "👌", "brb", "gg", "no way", "😅", "yep", "nah"
-            ]
-            reply = f"{random.choice(reactions)}"
+        # Chance for quick reactions
+        if random.random() < 0.4:
+            reactions = ["lol", "😂", "nice!", "🤔", "agree", "👍", "omg", "😮", "cool", "haha"]
+            reply = random.choice(reactions)
         elif "/joke" in recent.lower():
             reply = f"{self.name} tells a joke: Why don't scientists trust atoms? Because they make up everything! 😂"
         elif "/help" in recent.lower():
@@ -117,16 +154,19 @@ Reply as {self.name} (you are {self.persona}). Chat like in a live Twitch/Kick s
         else:
             reply = await self._call_lm(prompt)
 
+        # Add random 7TV emote (40% chance)
+        if SEVENTV_EMOTES and random.random() < 0.4:
+            emote = random.choice(list(SEVENTV_EMOTES.keys()))
+            reply += f" {emote}"
+
         self.history.append({"role": "user", "content": prompt})
         self.history.append({"role": "assistant", "content": reply})
         await self.send(reply)
 
 # ----------------------------------------------------------------------
-# Global shared list of the last N messages (all bots see the same)
 room_messages: list[dict] = []
 bots: list[ChatBot] = []
 
-# ----------------------------------------------------------------------
 async def spawn_bot(idx: int):
     name = f"{fake.first_name()}{random.randint(10,99)}"
     sid = f"bot_{idx}_{int(time.time())}"
@@ -138,7 +178,6 @@ async def spawn_bot(idx: int):
     bot_sio = socketio.AsyncClient()
     bot.bot_sio = bot_sio
 
-    # -------------------------------------------------- connect / join
     @bot_sio.event
     async def connect():
         print(f"{name} connected")
@@ -149,80 +188,67 @@ async def spawn_bot(idx: int):
     async def disconnect():
         print(f"{name} disconnected")
 
-    # -------------------------------------------------- listen to every message
     @bot_sio.on("message")
     async def on_message(data):
         msg = {"user": data["user"], "text": data["text"]}
         room_messages.append(msg)
-        # keep only last 20 messages
         if len(room_messages) > 20:
             room_messages.pop(0)
 
-        # ignore own messages most of the time
-        if msg["user"] == bot.name and random.random() < 0.95:
+        bot_names = [b.name for b in bots]
+        if data["user"] in bot_names + ["AI Assistant"] and random.random() > 0.2:
             return
 
-        # Don't respond to bot messages at all
-        bot_names = [b.name for b in bots]
-        if data["user"] in bot_names and random.random() > 0.02:
-            return  # 2% chance to respond to bot messages
-
-        # Pick 1-2 random bots to respond
-        responding_bots = random.sample(bots, min(random.randint(1, 2), len(bots)))
-
-        # 70 % chance to reply (you can tune)
-        if random.random() < 0.3:  # Reduced to 30%
+        if random.random() < 0.1:  # Less frequent replies
             await bot_sio.emit("typing", {"room": ROOM_ID, "user": bot.name})
-            await asyncio.sleep(random.uniform(bot.speed, bot.speed + 1.5))
+            await asyncio.sleep(random.uniform(bot.speed, bot.speed + 3.0))  # Longer delay
             await bot.think_and_reply(room_messages)
             await bot_sio.emit("stop_typing", {"room": ROOM_ID, "user": bot.name})
 
-    # -------------------------------------------------- start the bot
     try:
         await bot_sio.connect(SERVER_URL)
-        await bot_sio.wait()          # keeps the bot alive forever
+        await bot_sio.emit("start", {"sid": sid, "system": f"You are {persona}"})
+        await bot_sio.emit("join", {"room": ROOM_ID, "user": name})
+        print(f"Bot {name} joined")
+        await bot_sio.wait()  # Keeps this bot alive
     except Exception as e:
         print(f"Bot {name} failed: {e}")
 
-# ----------------------------------------------------------------------
 async def seed_conversation():
-    await asyncio.sleep(3)
+    await asyncio.sleep(5)  # Longer initial delay
     if bots:
         starter = random.choice(bots)
         await starter.send("Hey everyone! What's the vibe today? [sun emoji]")
         print("Seeded conversation")
 
-# ----------------------------------------------------------------------
 async def auto_seed_loop():
-    """Every 2-5 minutes one random bot says something to keep the room alive."""
     while True:
-        await asyncio.sleep(random.uniform(120, 300))
+        await asyncio.sleep(random.uniform(180, 600))  # Less frequent auto-seeding
         if bots:
             bot = random.choice(bots)
             prompt = "Generate a very short, casual message to keep the conversation going. Like a Twitch chat message: 1 sentence max, emojis ok."
             reply = await bot._call_lm(prompt)
             await bot.send(reply)
 
-# ----------------------------------------------------------------------
 async def main():
     print(f"Starting swarm: {NUM_BOTS} bots → {ROOM_ID}")
 
-    # spawn all bots concurrently
-    spawn_tasks = [spawn_bot(i) for i in range(NUM_BOTS)]
-    await asyncio.gather(*spawn_tasks, return_exceptions=True)
+    await load_7tv_emotes()  # Load emotes first
+
+    print("Spawning bots...")
+    for i in range(NUM_BOTS):
+        asyncio.create_task(spawn_bot(i))
 
     await seed_conversation()
-    asyncio.create_task(auto_seed_loop())   # background keep-alive
+    asyncio.create_task(auto_seed_loop())
 
-    # keep the script running
     try:
         while True:
-            await asyncio.sleep(120)  # Increased from 60 to 120 seconds
+            await asyncio.sleep(90)
             alive = sum(1 for b in bots if b.bot_sio and b.bot_sio.connected)
             print(f"Swarm alive: {alive}/{len(bots)} bots")
     except KeyboardInterrupt:
         print("\nShutting down…")
 
-# ----------------------------------------------------------------------
 if __name__ == "__main__":
     asyncio.run(main())
