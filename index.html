@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>AI Swarm Chat</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root {
+      --bg: #f4f4f9;
+      --chat-bg: #ffffff;
+      --user-bg: #e9ecef;
+      --primary: #0b5fff;
+      --text: #2d3748;
+      --muted: #718096;
+    }
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, -apple-system, sans-serif; margin:0; background:var(--bg); color:var(--text); }
+    #app { display:flex; height:100vh; max-width:1200px; margin:auto; }
+    #main { flex:1; display:flex; flex-direction:column; background:var(--chat-bg); border-radius:12px; overflow:hidden; box-shadow:0 4px 20px rgba(0,0,0,.08); }
+    header { background:var(--primary); color:#fff; padding:12px 16px; font-weight:600; font-size:1.1rem; }
+    #chat { flex:1; padding:12px; overflow-y:auto; background:#000; color:#fff; font-family: 'Courier New', monospace; font-size:14px; line-height:1.4; }
+    .msg { margin:2px 0; }
+    .msg.bot { color:#ff6b6b; } /* Different color for bots */
+    .msg.user { color:#4ecdc4; } /* Different color for user */
+    .timestamp { color:#666; }
+    .username { font-weight:bold; }
+    .avatar { width:32px; height:32px; border-radius:50%; background:var(--primary); color:#fff; display:flex; align-items:center; justify-content:center; font-weight:bold; font-size:0.8rem; flex-shrink:0; }
+    .bubble { max-width:70%; padding:8px 12px; border-radius:18px; background:#e2e8f0; position:relative; }
+    .bot .bubble { background:var(--primary); color:#fff; }
+    .user .bubble { background:#fff; border:1px solid #ddd; }
+    .time { font-size:0.7rem; color:var(--muted); margin-top:4px; }
+    .system { font-style:italic; color:var(--muted); text-align:center; margin:8px 0; font-size:0.85rem; }
+    #typing { padding:8px 16px; color:var(--muted); font-style:italic; font-size:0.9rem; min-height:1.4em; }
+    #inputRow { display:flex; border-top:1px solid #eee; background:#fff; }
+    #input { flex:1; padding:14px; border:none; font-size:1rem; outline:none; }
+    #send { padding:0 18px; background:var(--primary); color:#fff; border:none; font-weight:600; cursor:pointer; }
+    #send:hover { background:#094edc; }
+
+    /* Sidebar */
+    #sidebar { width:220px; background:var(--user-bg); border-left:1px solid #ddd; padding:12px; }
+    #sidebar h3 { margin:0 0 12px; font-size:0.9rem; text-transform:uppercase; color:var(--muted); letter-spacing:0.5px; }
+    #userList { list-style:none; padding:0; margin:0; }
+    #userList li { padding:6px 8px; border-radius:8px; margin:4px 0; font-size:0.9rem; display:flex; align-items:center; gap:8px; }
+    #userList li.online { background:#d4edda; color:#155724; }
+    #userList li::before { content:"●"; font-size:0.6rem; }
+    #userList li.online::before { color:#28a745; }
+
+    @media (max-width:768px) {
+      #app { flex-direction:column; }
+      #sidebar { width:100%; order:2; border-left:none; border-top:1px solid #ddd; }
+    }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <section id="main">
+      <header>Room: <span id="roomName">test-room-123</span></header>
+      <div id="chat"></div>
+      <div id="typing"></div>
+      <div id="inputRow">
+        <input id="input" placeholder="Type a message…" autocomplete="off" />
+        <button id="send">Send</button>
+      </div>
+    </section>
+
+    <aside id="sidebar">
+      <h3>Users Online</h3>
+      <ul id="userList"></ul>
+    </aside>
+  </div>
+
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+  <script>
+    const SERVER_URL = "http://localhost:5000";
+    const ROOM_ID = "test-room-123";
+    const DEFAULT_NAME = "User" + Math.floor(Math.random()*9000+1000);
+
+    const chat = document.getElementById("chat");
+    const typing = document.getElementById("typing");
+    const input = document.getElementById("input");
+    const sendBtn = document.getElementById("send");
+    const userList = document.getElementById("userList");
+
+    const userName = prompt("Enter your name:", DEFAULT_NAME) || DEFAULT_NAME;
+    const sid = Math.random().toString(36).slice(2);
+    const socket = io(SERVER_URL, {transports:["websocket"]});
+
+    let typingUsers = new Set();
+    let typingTimeout = null;
+    let currentStreamLine = null;
+
+    // --- User List Management ---
+    const onlineUsers = new Set();
+
+    function updateUserList() {
+      userList.innerHTML = "";
+      [...onlineUsers].sort().forEach(name => {
+        const li = document.createElement("li");
+        li.className = "online";
+        li.innerHTML = `<span class="avatar">${name[0].toUpperCase()}</span> ${escape(name)}`;
+        userList.appendChild(li);
+      });
+    }
+
+    // --- Socket Events ---
+    socket.on("connect", () => {
+      socket.emit("start", {sid, system: "You are a helpful assistant."});
+      socket.emit("join", {room: ROOM_ID, user: userName});
+      onlineUsers.add("AI Assistant");
+      updateUserList();
+      addSystem(`You joined as <b>${escape(userName)}</b>`);
+    });
+
+    socket.on("status", d => addSystem(d.message));
+    socket.on("error", d => addSystem(`Error: ${d.message}`));
+
+    socket.on("user_joined", data => {
+      onlineUsers.add(data.user);
+      updateUserList();
+      addSystem(`${escape(data.user)} joined the room`);
+    });
+
+    socket.on("user_left", data => {
+      onlineUsers.delete(data.user);
+      updateUserList();
+      addSystem(`${escape(data.user)} left the room`);
+    });
+
+    socket.on("message", data => {
+      // Skip adding the message if it's from the user or AI Assistant (already shown via streaming)
+      if (data.user === userName || data.user === "AI Assistant") return;
+      const isBot = data.user !== userName;
+      addMessage(data.user, data.text, isBot);
+    });
+
+    socket.on("typing", d => {
+      if (d.user !== userName) {
+        typingUsers.add(d.user);
+        updateTyping();
+      }
+    });
+
+    socket.on("stop_typing", d => {
+      typingUsers.delete(d.user);
+      updateTyping();
+    });
+
+    socket.on("stream", d => {
+      if (!currentStreamLine) {
+        currentStreamLine = addMessage("AI Assistant", "", true, true);
+      }
+      currentStreamLine.querySelector(".message").innerHTML += escape(d.token);
+      scrollChat();
+    });
+
+    socket.on("done", () => currentStreamLine = null);
+
+    // --- Typing Indicator ---
+    function updateTyping() {
+      clearTimeout(typingTimeout);
+      if (typingUsers.size === 0) {
+        typing.textContent = "";
+        return;
+      }
+      const users = [...typingUsers];
+      let text = users.length === 1 ? `${users[0]} is typing…`
+                 : users.length === 2 ? `${users[0]} and ${users[1]} are typing…`
+                 : `${users.length} people are typing…`;
+      typing.textContent = text;
+      typingTimeout = setTimeout(() => {
+        typingUsers.clear();
+        typing.textContent = "";
+      }, 2000);
+    }
+
+    let userTypingTO = null;
+    input.addEventListener("input", () => {
+      socket.emit("typing", {room: ROOM_ID, user: userName});
+      clearTimeout(userTypingTO);
+      userTypingTO = setTimeout(() => {
+        socket.emit("stop_typing", {room: ROOM_ID, user: userName});
+      }, 1000);
+    });
+
+    // --- Send Message ---
+    sendBtn.onclick = send;
+    input.addEventListener("keydown", e => { if (e.key === "Enter") send(); });
+
+    function send() {
+      const text = input.value.trim();
+      if (!text) return;
+      input.value = "";
+      socket.emit("stop_typing", {room: ROOM_ID, user: userName});
+      addMessage(userName, text, false);
+      socket.emit("message", {sid, text, room: ROOM_ID, user: userName});
+    }
+
+    // --- Message Rendering ---
+    function addMessage(user, text, isBot, streaming = false) {
+      const div = document.createElement("div");
+      div.className = `msg ${isBot ? 'bot' : 'user'}`;
+
+      const time = new Date().toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+      const messageText = streaming ? "" : escape(text);
+
+      if (streaming && !currentStreamLine) {
+        currentStreamLine = div;
+      }
+
+      div.innerHTML = `<span class="timestamp">[${time}]</span> <span class="username">${escape(user)}:</span> <span class="message">${messageText}</span>`;
+
+      if (streaming) {
+        currentStreamLine.querySelector(".message").innerHTML += escape(text);
+      }
+
+      chat.appendChild(div);
+      scrollChat();
+      return div;
+    }
+
+    function addSystem(text) {
+      const p = document.createElement("div");
+      p.className = "system";
+      p.innerHTML = text;
+      chat.appendChild(p);
+      scrollChat();
+    }
+
+    function scrollChat() {
+      chat.scrollTop = chat.scrollHeight;
+    }
+
+    function escape(s) {
+      const div = document.createElement("div");
+      div.textContent = s;
+      return div.innerHTML;
+    }
+  </script>
+</body>
+</html>

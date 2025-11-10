@@ -1,0 +1,3 @@
+# Python Bot Swarm  
+
+not sure what I'm doing with this yet, might make it a component to add to apps...
