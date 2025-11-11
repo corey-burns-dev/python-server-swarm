@@ -40,8 +40,9 @@
     .emote-btn:hover { background:#e0e0e0; }
     #inputAndSend { display:flex; }
     #input { flex:1; padding:14px; border:none; font-size:1rem; outline:none; background:#18181b; color:#ffffff; }
-    #send { padding:0 18px; background:#9146ff; color:#fff; border:none; font-weight:600; cursor:pointer; }
+  #send { padding:0 18px; background:#9146ff; color:#fff; border:none; font-weight:600; cursor:pointer; }
     #send:hover { background:#094edc; }
+    
       .message img {
         transition: transform 0.1s;
       }
@@ -49,13 +50,20 @@
         transform: scale(1.5);
       }
     /* Sidebar */
-    #sidebar { flex:1; background:var(--user-bg); border-left:1px solid #ddd; padding:12px; }
-    #sidebar h3 { margin:0 0 12px; font-size:0.9rem; text-transform:uppercase; color:var(--muted); letter-spacing:0.5px; }
-    #userList { list-style:none; padding:0; margin:0; }
-    #userList li { padding:6px 8px; border-radius:8px; margin:4px 0; font-size:0.9rem; display:flex; align-items:center; gap:8px; background:#2a2a2e; color:#ffffff; }
-    #userList li.online { background:#d4edda; color:#155724; }
-    #userList li::before { content:"●"; font-size:0.6rem; }
-    #userList li.online::before { color:#28a745; }
+    #sidebar { flex:1; background:var(--user-bg); border-left:1px solid #ddd; padding:8px; display:flex; flex-direction:column; min-width:200px; }
+    #sidebar h3 { margin:0 0 8px; font-size:0.85rem; text-transform:uppercase; color:var(--muted); letter-spacing:0.5px; }
+    #userList { list-style:none; padding:4px; margin:0; overflow:auto; flex:1 1 auto; max-height:calc(100vh - 120px); }
+    #userList li { padding:6px 6px; border-radius:6px; margin:3px 0; font-size:0.86rem; display:flex; align-items:center; gap:8px; background:#2a2a2e; color:#ffffff; }
+    #userList li.online { background:#2b8a66; color:#fff; }
+    #userList li::before { content:""; margin-right:0.4rem; }
+    #userList li .avatar { width:24px; height:24px; font-size:0.7rem; }
+    /* Denser layout on small screens too */
+    @media (max-width:768px) {
+      #sidebar { min-width:unset; padding:6px; }
+      #userList { max-height:160px; }
+      #userList li { padding:4px 6px; margin:2px 0; font-size:0.82rem; gap:6px; }
+      #userList li .avatar { width:20px; height:20px; font-size:0.65rem; }
+    }
 
     @media (max-width:768px) {
       #app { flex-direction:column; }
@@ -371,6 +379,8 @@
       const colors = ['#ff0000', '#00ff00', '#0000ff', '#ffff00', '#ff00ff', '#00ffff', '#ffa500', '#800080', '#ffc0cb', '#a52a2a'];
       return colors[Math.floor(Math.random() * colors.length)];
     }
+
+    
   </script>
 </body>
 </html>

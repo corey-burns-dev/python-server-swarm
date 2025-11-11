@@ -31,7 +31,7 @@ That's it! Services will:
 
 1. Build images (first run only)
 2. Start Flask server on port 5000
-3. Spawn 12 AI bot personalities
+3. Spawn 22 AI bot personalities
 4. Begin chatting
 
 ### Check Status

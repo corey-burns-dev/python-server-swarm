@@ -188,6 +188,20 @@ PERSONAS = [
 # ----------------------------------------------------------------------
 SEVENTV_EMOTES = {}
 
+# Try to load local emotes/emotes.json (written by the downloader) so bots can use local emotes
+try:
+	local_map_path = os.path.join(os.path.dirname(__file__), 'emotes', 'emotes.json')
+	if os.path.exists(local_map_path):
+		with open(local_map_path, 'r', encoding='utf-8') as f:
+			local_map = json.load(f)
+			# local_map maps emoteName -> filename; use name->filename mapping
+			for k in local_map.keys():
+				# give a placeholder ID or filename as value; bots only need keys
+				SEVENTV_EMOTES[k] = local_map[k]
+			print(f"Loaded {len(local_map)} local emotes from emotes/emotes.json")
+except Exception as e:
+	print(f"Failed loading local emotes: {e}")
+
 # Common Twitch slang and abbreviations
 TWITCH_SLANG = [
 		"poggers", "based", "cringe", "copium", "hopium", "kekw",
