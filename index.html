@@ -20,8 +20,9 @@
     header { background:var(--primary); color:#fff; padding:12px 16px; font-weight:600; font-size:1.1rem; }
     #chat { flex:1; padding:12px; overflow-y:auto; background:#0e0e10; color:#ffffff; font-family: 'Courier New', monospace; font-size:14px; line-height:1.4; }
     .msg { margin:2px 0; }
-    .msg.bot { color:#00ff88; } /* Green for bots */
-    .msg.user { color:#ffffff; } /* White for user */
+  /* Force all chat text to white for consistency */
+  .msg.bot { color:#ffffff; }
+  .msg.user { color:#ffffff; }
     .timestamp { color:#888; }
     .username { font-weight:bold; }
     .avatar { width:32px; height:32px; border-radius:50%; background:var(--primary); color:#fff; display:flex; align-items:center; justify-content:center; font-weight:bold; font-size:0.8rem; flex-shrink:0; }
@@ -30,6 +31,8 @@
     .user .bubble { background:#fff; border:1px solid #ddd; }
     .time { font-size:0.7rem; color:var(--muted); margin-top:4px; }
     .system { font-style:italic; color:#aaa; text-align:center; margin:8px 0; font-size:0.85rem; }
+  .mention { background: rgba(255,255,255,0.06); color: #fff; padding: 0 6px; border-radius: 4px; font-weight:700; }
+  .mention.me { background: rgba(145,70,255,0.14); color: #fff; }
     #typing { padding:8px 16px; color:var(--muted); font-style:italic; font-size:0.9rem; min-height:1.4em; }
     #inputRow { display:flex; flex-direction:column; border-top:1px solid #2a2a2e; background:#18181b; }
     #emoteBar { display:flex; gap:4px; padding:8px; flex-wrap:wrap; }
@@ -188,6 +191,16 @@
       } catch (e) { console.warn(e); }
     });
 
+    // Fallback: server may send room history which contains the users array
+    socket.on("room_history", data => {
+      try {
+        const arr = (data && data.users) || [];
+        arr.forEach(u => onlineUsers.add(u));
+        updateUserList();
+        console.log("Received room_history users", arr.length, arr);
+      } catch (e) { console.warn(e); }
+    });
+
     socket.on("user_left", data => {
       onlineUsers.delete(data.user);
       updateUserList();
@@ -271,7 +284,7 @@
   div.className = `msg ${isBot ? 'bot' : 'user'}`;
 
   const time = new Date().toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
-  const messageText = streaming ? "" : parseEmotes(escape(text));
+  const messageText = streaming ? "" : highlightMentions(parseEmotes(escape(text)));
 
   if (streaming && !currentStreamLine) {
     currentStreamLine = div;
@@ -318,13 +331,39 @@
     function parseEmotes(text) {
       // Replace emote names with img tags using the downloaded filenames
       const emoteMap = seventvEmotes || window.emotes || {};
-      for (const [name, filename] of Object.entries(emoteMap)) {
+      // Process longer names first to avoid partial matches (e.g., Clap2 vs Clap)
+      const entries = Object.entries(emoteMap).sort((a,b)=>b[0].length - a[0].length);
+      for (const [name, filename] of entries) {
           // escape the emote name for regex
           const nameRe = name.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&");
-          const regex = new RegExp(`\\b${nameRe}\\b`, 'g');
-      // Prefix with SERVER_URL so images load even when index.html is opened via file://
-      text = text.replace(regex, `<img src="${SERVER_URL}/emotes/${filename}" alt="${name}" class="emote">`);
+          // match emote at start or after whitespace, and followed by end/space/punct
+          const regex = new RegExp(`(^|\\s)(${nameRe})(?=$|\\s|[.,!?])`, 'gi');
+          // Prefix with SERVER_URL so images load even when index.html is opened via file://
+          text = text.replace(regex, (m, prefix, emoteName) => {
+            return `${prefix}<img src="${SERVER_URL}/emotes/${filename}" alt="${emoteName}" class="emote">`;
+          });
       }
+      return text;
+    }
+
+    function escapeRegExp(s) {
+      return s.replace(/[.*+?^${}()|[\\]\\]/g, "\\$&");
+    }
+
+    function highlightMentions(text) {
+      try {
+        // sort by length so longer names are replaced first (avoid partials)
+        const users = [...onlineUsers].filter(Boolean).sort((a,b)=>b.length-a.length);
+        for (const name of users) {
+          const re = new RegExp("@" + escapeRegExp(name), 'gi');
+          text = text.replace(re, (m)=> {
+            // preserve the displayed case, but mark specially if it's you
+            const isMe = name.toLowerCase() === userName.toLowerCase();
+            const safe = escape(m);
+            return `<span class="mention${isMe? ' me' : ''}">${safe}</span>`;
+          });
+        }
+      } catch(e) { console.warn(e); }
       return text;
     }
 

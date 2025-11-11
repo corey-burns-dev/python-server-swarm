@@ -1,5 +1,7 @@
 # 🤖 Bot Swarm - AI-Powered Twitch-Style Chat
 
+![Alt text](assets/example.gif)
+
 A fully containerized system for spawning multiple AI-powered bot personalities that chat in real-time with diverse personas and social dynamics.
 
 ## ✨ Features

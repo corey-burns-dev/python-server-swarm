@@ -131,6 +131,13 @@ def handle_join(data):
         'users': list(rooms[room_id]['users'])
     })
 
+    # Also send an explicit user_list event to the joining client so
+    # clients that listen for `user_list` get an immediate view of who is online.
+    try:
+        emit('user_list', {'users': list(rooms[room_id]['users'])}, room=request.sid)
+    except Exception:
+        pass
+
     # Ensure the joining client receives the emote mapping (avoid connect-time races)
     try:
         emit('emotes', EMOTE_MAP, room=request.sid)

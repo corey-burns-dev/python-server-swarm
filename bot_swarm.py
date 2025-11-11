@@ -18,7 +18,8 @@ LM_API     = os.getenv("LM_API", "http://localhost:1234/v1/chat/completions")
 MODEL      = os.getenv("LM_MODEL", "lmstudio-community/Meta-Llama-3-8B-Instruct")
 
 ROOM_ID    = "test-room-123"
-NUM_BOTS   = 12
+# NUM_BOTS: prefer explicit env override, but we'll enforce one-bot-per-persona below
+NUM_BOTS   = int(os.getenv("NUM_BOTS", "22"))
 MAX_TOKENS = 60
 TEMPERATURE = 0.85
 
@@ -449,15 +450,17 @@ class ChatBot:
 				return random.choice(responses)
 
 		async def send(self, text: str):
-				self.msg_count += 1
-				self.last_msg_time = time.time()
-				print(f"{self.name} → {text}")
-				if self.bot_sio and self.bot_sio.connected:
-						await self.bot_sio.emit("bot_message", {
-								"user": self.name,
-								"text": text,
-								"room": ROOM_ID
-						})
+			self.msg_count += 1
+			self.last_msg_time = time.time()
+			print(f"{self.name} → {text}")
+			if self.bot_sio and self.bot_sio.connected:
+				# Mark messages coming from bots so others can ignore bot-to-bot replies
+				await self.bot_sio.emit("bot_message", {
+					"user": self.name,
+					"text": text,
+					"room": ROOM_ID,
+					"is_bot": True
+				})
 
 		def should_respond(self, room_history: list) -> bool:
 				"""Smarter response logic"""
@@ -470,6 +473,11 @@ class ChatBot:
 				if any(m["user"] == self.name for m in recent):
 						return False
 				
+				# Ignore bot messages to avoid bot->bot cascades
+				if any(m.get("is_bot") for m in recent):
+					# If the latest messages are bots, don't respond
+					return False
+
 				# Lurkers respond way less
 				if self.is_lurker and random.random() > 0.15:
 						return False
@@ -491,7 +499,8 @@ class ChatBot:
 								return random.random() < 0.4
 				
 				# Check cooldown (don't spam)
-				if time.time() - self.last_msg_time < 5:
+				# Increase cooldown to reduce flood — default 10s between messages
+				if time.time() - self.last_msg_time < 10:
 						return False
 				
 				# Chain engagement - if engaged in topic, keep responding
@@ -775,61 +784,62 @@ room_messages: List[dict] = []
 bots: List[ChatBot] = []
 
 
-async def spawn_bot(idx: int):
+async def spawn_bot(idx: int, persona: dict | None = None):
+		"""Spawn a single bot. If persona is provided, use it; otherwise pick randomly."""
 		name = f"{fake.first_name()}{random.randint(10,999)}"
 		sid = f"bot_{idx}_{int(time.time())}"
-		persona = random.choice(PERSONAS)
+		if persona is None:
+			persona = random.choice(PERSONAS)
 
 		bot = ChatBot(sid, name, persona)
 		bots.append(bot)
 
 		bot_sio: socketio.AsyncClient = socketio.AsyncClient()
 		bot.bot_sio = bot_sio
-	
+
 		@bot_sio.event
 		async def connect():
-				print(f"{name} connected as: {persona['name']}")
-				await bot_sio.emit("start", {"sid": sid, "system": f"You are {persona['desc']}"})
-				await bot_sio.emit("join", {"room": ROOM_ID, "user": name})
-	
+			print(f"{name} connected as: {persona['name']}")
+			# emit initial session info and join room once
+			await bot_sio.emit("start", {"sid": sid, "system": f"You are {persona['desc']}"})
+			await bot_sio.emit("join", {"room": ROOM_ID, "user": name})
+
 		@bot_sio.event
 		async def disconnect():
-				print(f"{name} disconnected")
-	
+			print(f"{name} disconnected")
+
 		@bot_sio.on("message")  # type: ignore
 		async def on_message(data):
-				msg = {"user": data["user"], "text": data["text"]}
-				room_messages.append(msg)
-				
-				# Keep last 50 messages
-				if len(room_messages) > 50:
-						room_messages.pop(0)
-	
-				# Smart response logic
-				if not bot.should_respond(room_messages):
-						return
-	
-				# Show typing indicator
-				await bot_sio.emit("typing", {"room": ROOM_ID, "user": bot.name})
-				
-				# Realistic typing delay (reading + typing time)
-				read_time = len(data["text"]) * 0.03  # Time to read message
-				type_time = random.uniform(bot.speed * 0.5, bot.speed * 1.5)
-				await asyncio.sleep(read_time + type_time)
-				
-				await bot.think_and_reply(room_messages)
-				await bot_sio.emit("stop_typing", {"room": ROOM_ID, "user": bot.name})
-	
+			# Preserve is_bot flag if present so bots can ignore bot-originated messages
+			msg = {"user": data["user"], "text": data["text"], "is_bot": data.get("is_bot", False)}
+			room_messages.append(msg)
+
+			# Keep last 50 messages
+			if len(room_messages) > 50:
+				room_messages.pop(0)
+
+			# Smart response logic
+			if not bot.should_respond(room_messages):
+				return
+
+			# Show typing indicator
+			await bot_sio.emit("typing", {"room": ROOM_ID, "user": bot.name})
+
+			# Realistic typing delay (reading + typing time)
+			read_time = len(data["text"]) * 0.03  # Time to read message
+			type_time = random.uniform(bot.speed * 0.5, bot.speed * 1.5)
+			await asyncio.sleep(read_time + type_time)
+
+			await bot.think_and_reply(room_messages)
+			await bot_sio.emit("stop_typing", {"room": ROOM_ID, "user": bot.name})
+
 		try:
-				await bot_sio.connect(SERVER_URL)
-				await bot_sio.emit("start", {"sid": sid, "system": f"You are {persona['desc']}"})
-				await bot_sio.emit("join", {"room": ROOM_ID, "user": name})
-				await bot_sio.emit("start", {"sid": sid, "system": f"You are {persona['desc']}"})
-				await bot_sio.emit("join", {"room": ROOM_ID, "user": name})
-				print(f"Bot {name} spawned")
-				await bot_sio.wait()
+			# Connect; the connect handler will perform the start/join emits
+			await bot_sio.connect(SERVER_URL)
+			print(f"Bot {name} spawned (persona={persona['name']})")
+			await bot_sio.wait()
 		except Exception as e:
-				print(f"Bot {name} error: {e}")
+			print(f"Bot {name} error: {e}")
 
 async def seed_conversation():
 		"""Start initial conversation"""
@@ -846,142 +856,161 @@ async def seed_conversation():
 				await starter.send(msg)
 
 async def periodic_activity():
-		"""Bots occasionally send unprompted messages"""
-		while True:
-				await asyncio.sleep(random.uniform(45, 120))
-				
-				if not bots or not room_messages:
-						continue
-				
-				# Pick a chatty bot
-				active_bots = [b for b in bots if b.chattiness > 0.15]
-				if not active_bots:
-						continue
-				
-				bot = random.choice(active_bots)
-				
-				actions = [
-						("streamer_reaction", 0.25),
-						("random_comment", 0.35),
-						("copypasta", 0.1),
-						("emote_spam", 0.15),
-						("start_topic", 0.1),
-						("call_out_lurkers", 0.05),
-				]
-				
-				action = random.choices([a[0] for a in actions], [a[1] for a in actions])[0]
-				
-				if action == "streamer_reaction":
-						# Simulate reacting to fake streamer event
-						event = random.choice(STREAMER_EVENTS)
-						msg = random.choice(STREAMER_REACTIONS)
-						if SEVENTV_EMOTES:
-								msg += f" {random.choice(list(SEVENTV_EMOTES.keys()))}"
-						await bot.send(msg)
-				
-				elif action == "random_comment":
-						comments = [
-								"this stream actually good", "based content", "W streamer fr",
-								"chat moving so fast", "anyone else seeing this", "clip that",
-								"POV:", "rare W", "common L", "im done 💀", "unironically good",
-								"actually based", "elite gameplay", "bro is HIM"
-						]
-						await bot.send(random.choice(comments))
-				
-				elif action == "copypasta":
-						if SEVENTV_EMOTES:
-								emote = random.choice(list(SEVENTV_EMOTES.keys()))
-								await bot.send(f"{emote} " * random.randint(3, 7))
-				
-				elif action == "emote_spam":
-						if SEVENTV_EMOTES:
-								emote = random.choice(list(SEVENTV_EMOTES.keys()))
-								await bot.send(emote * random.randint(2, 5))
-				
-				elif action == "start_topic":
-						topics = [
-								"anyone watching the new episode?",
-								"whos your favorite character?",
-								"best arc?",
-								"this reminds me of that one scene",
-								"hot take:",
-								"unpopular opinion:",
-								"real talk tho"
-						]
-						await bot.send(random.choice(topics))
-				
-				elif action == "call_out_lurkers":
-						lurkers = [b for b in bots if b.is_lurker and b.msg_count < 3]
-						if lurkers:
-								target = random.choice(lurkers)
-								await bot.send(f"@{target.name} lurker spotted 👁️")
+	"""Bots occasionally send unprompted messages"""
+	while True:
+		# Increase interval to reduce chatter
+		await asyncio.sleep(random.uniform(90, 240))
+
+		if not bots or not room_messages:
+			continue
+
+		# Pick a chatty bot
+		active_bots = [b for b in bots if b.chattiness > 0.15]
+		if not active_bots:
+			continue
+
+		bot = random.choice(active_bots)
+
+		actions = [
+			("streamer_reaction", 0.25),
+			("random_comment", 0.35),
+			("copypasta", 0.1),
+			("emote_spam", 0.15),
+			("start_topic", 0.1),
+			("call_out_lurkers", 0.05),
+		]
+
+		action = random.choices([a[0] for a in actions], [a[1] for a in actions])[0]
+
+		if action == "streamer_reaction":
+			# Simulate reacting to fake streamer event
+			event = random.choice(STREAMER_EVENTS)
+			msg = random.choice(STREAMER_REACTIONS)
+			if SEVENTV_EMOTES:
+				msg += f" {random.choice(list(SEVENTV_EMOTES.keys()))}"
+			await bot.send(msg)
+
+		elif action == "random_comment":
+			comments = [
+				"this stream actually good", "based content", "W streamer fr",
+				"chat moving so fast", "anyone else seeing this", "clip that",
+				"POV:", "rare W", "common L", "im done 💀", "unironically good",
+				"actually based", "elite gameplay", "bro is HIM"
+			]
+			await bot.send(random.choice(comments))
+
+		elif action == "copypasta":
+			if SEVENTV_EMOTES:
+				emote = random.choice(list(SEVENTV_EMOTES.keys()))
+				await bot.send(f"{emote} " * random.randint(3, 7))
+
+		elif action == "emote_spam":
+			if SEVENTV_EMOTES:
+				emote = random.choice(list(SEVENTV_EMOTES.keys()))
+				await bot.send(emote * random.randint(2, 5))
+
+		elif action == "start_topic":
+			topics = [
+				"anyone watching the new episode?",
+				"whos your favorite character?",
+				"best arc?",
+				"this reminds me of that one scene",
+				"hot take:",
+				"unpopular opinion:",
+				"real talk tho"
+			]
+			await bot.send(random.choice(topics))
+
+		elif action == "call_out_lurkers":
+			lurkers = [b for b in bots if b.is_lurker and b.msg_count < 3]
+			if lurkers:
+				target = random.choice(lurkers)
+				await bot.send(f"@{target.name} lurker spotted 👁️")
 
 async def simulate_streamer_events():
-		"""Simulate streamer doing things that chat reacts to"""
-		while True:
-				await asyncio.sleep(random.uniform(90, 180))
-				
-				if not bots:
-						continue
-				
-				event = random.choice(STREAMER_EVENTS)
-				
-				# Multiple bots react at once (like real chat)
-				num_reactors = random.randint(2, 5)
-				reactors = random.sample(bots, min(num_reactors, len(bots)))
-				
-				reactions = {
-						"took damage": ["NOOO", "Sadge", "oof", "rip", "unlucky"],
-						"got a kill": ["LETS GO", "POGGERS", "GG", "ez", "clean"],
-						"died": ["KEKW", "deserved", "LULW", "skill issue", "actual bot"],
-						"clutched": ["HOLY", "NO SHOT", "HES INSANE", "CLIP THAT", "GIGACHAD"],
-						"missed": ["OMEGALUL", "how", "bro", "pepeLaugh", "whiff"],
-						"rage quit": ["MALD", "malding", "here we go", "classic", "real"],
-						"laughing": ["PepeLaugh", "contagious laugh", "actual comedian"],
-						"malding": ["MALD DETECTED", "Copium", "coping"],
-						"got donated": ["PogChamp", "W donator", "based dono"],
-						"reading chat": ["📖", "reading andy", "hi mom"]
-				}
-				
-				possible_reactions = reactions.get(event, ["POG"])
-				
-				for bot in reactors:
-						await asyncio.sleep(random.uniform(0.2, 1.5))  # Stagger reactions
-						msg = random.choice(possible_reactions)
-						if SEVENTV_EMOTES and random.random() < 0.6:
-								msg += f" {random.choice(list(SEVENTV_EMOTES.keys()))}"
-						await bot.send(msg)
+	"""Simulate streamer doing things that chat reacts to"""
+	while True:
+		# Less frequent streamer events to reduce bursts
+		await asyncio.sleep(random.uniform(180, 360))
+
+		if not bots:
+			continue
+
+		event = random.choice(STREAMER_EVENTS)
+
+		# Multiple bots react at once (like real chat)
+		num_reactors = random.randint(2, 5)
+		reactors = random.sample(bots, min(num_reactors, len(bots)))
+
+		reactions = {
+			"took damage": ["NOOO", "Sadge", "oof", "rip", "unlucky"],
+			"got a kill": ["LETS GO", "POGGERS", "GG", "ez", "clean"],
+			"died": ["KEKW", "deserved", "LULW", "skill issue", "actual bot"],
+			"clutched": ["HOLY", "NO SHOT", "HES INSANE", "CLIP THAT", "GIGACHAD"],
+			"missed": ["OMEGALUL", "how", "bro", "pepeLaugh", "whiff"],
+			"rage quit": ["MALD", "malding", "here we go", "classic", "real"],
+			"laughing": ["PepeLaugh", "contagious laugh", "actual comedian"],
+			"malding": ["MALD DETECTED", "Copium", "coping"],
+			"got donated": ["PogChamp", "W donator", "based dono"],
+			"reading chat": ["📖", "reading andy", "hi mom"]
+		}
+
+		possible_reactions = reactions.get(event, ["POG"])
+
+		for bot in reactors:
+			await asyncio.sleep(random.uniform(0.2, 1.5))  # Stagger reactions
+			msg = random.choice(possible_reactions)
+			if SEVENTV_EMOTES and random.random() < 0.6:
+				msg += f" {random.choice(list(SEVENTV_EMOTES.keys()))}"
+			await bot.send(msg)
 
 async def main():
-		print(f"🤖 Starting bot swarm: {NUM_BOTS} bots → {ROOM_ID}")
-		print(f"🎯 Server: {SERVER_URL}")
-		
-		await load_7tv_emotes()
-		
-		print("🚀 Spawning bots...")
-		for i in range(NUM_BOTS):
-				asyncio.create_task(spawn_bot(i))
-				await asyncio.sleep(0.5)  # Stagger spawns
-		
-		await seed_conversation()
-		asyncio.create_task(periodic_activity())
-		asyncio.create_task(simulate_streamer_events())
-		
-		try:
-				while True:
-						await asyncio.sleep(60)
-						alive = sum(1 for b in bots if b.bot_sio and b.bot_sio.connected)
-						total_msgs = sum(b.msg_count for b in bots)
-						
-						# Show relationship stats
-						total_friendships = sum(len(b.friendships) for b in bots)
-						total_beef = sum(len(b.beef) for b in bots)
-						lurkers = sum(1 for b in bots if b.is_lurker)
-						
-						print(f"📊 Status: {alive}/{len(bots)} bots | {total_msgs} messages")
-						print(f"💬 Social: {total_friendships} friendships | {total_beef} beefs | {lurkers} lurkers")
-		except KeyboardInterrupt:
-				print("\n👋 Shutting down swarm...")
+	# Determine persona count up front so startup messaging reflects what will actually spawn
+	persona_count = len(PERSONAS)
+	effective_bots = persona_count
+
+	print(f"🤖 Starting bot swarm: {effective_bots} bots → {ROOM_ID}")
+	print(f"🎯 Server: {SERVER_URL}")
+
+	# Load emotes before spawning to allow bots to reference them
+	await load_7tv_emotes()
+
+	print("🚀 Spawning bots...")
+
+	# Enforce exactly one bot per persona: use persona count as the number of bots
+	if NUM_BOTS != persona_count:
+		print(f"Note: NUM_BOTS={NUM_BOTS} ignored — spawning one bot per persona ({persona_count})")
+
+	# Spawn exactly one bot per persona, shuffled so assignment is random
+	personas_order = PERSONAS.copy()
+	random.shuffle(personas_order)
+
+	for i, persona in enumerate(personas_order):
+		asyncio.create_task(spawn_bot(i, persona))
+		await asyncio.sleep(0.5)  # Stagger spawns
+
+	# Give bots a moment to connect and register
+	await asyncio.sleep(3)
+	connected = sum(1 for b in bots if b.bot_sio and b.bot_sio.connected)
+	print(f"🚨 Spawned {len(bots)} bot objects, {connected} currently connected")
+
+	await seed_conversation()
+	asyncio.create_task(periodic_activity())
+	asyncio.create_task(simulate_streamer_events())
+
+	try:
+		while True:
+			await asyncio.sleep(60)
+			alive = sum(1 for b in bots if b.bot_sio and b.bot_sio.connected)
+			total_msgs = sum(b.msg_count for b in bots)
+			# Show relationship stats
+			total_friendships = sum(len(b.friendships) for b in bots)
+			total_beef = sum(len(b.beef) for b in bots)
+			lurkers = sum(1 for b in bots if b.is_lurker)
+			print(f"📊 Status: {alive}/{len(bots)} bots | {total_msgs} messages")
+			print(f"💬 Social: {total_friendships} friendships | {total_beef} beefs | {lurkers} lurkers")
+	except KeyboardInterrupt:
+		print("\n👋 Shutting down swarm...")
 
 
 
