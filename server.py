@@ -168,6 +168,13 @@ def on_message(data):
     if not user_text:
         return
 
+    # Check for AI trigger
+    ai_trigger = False  # AI muted - only bots chat
+
+    if not ai_trigger:
+        # Don't respond
+        return
+
     # Append user message
     messages = conversations.setdefault(sid, [{"role": "system", "content": "You are a helpful assistant."}])
     messages.append({"role": "user", "content": user_text})

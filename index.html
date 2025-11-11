@@ -15,8 +15,8 @@
     }
     * { box-sizing: border-box; }
     body { font-family: system-ui, -apple-system, sans-serif; margin:0; background:var(--bg); color:var(--text); }
-    #app { display:flex; height:100vh; max-width:1200px; margin:auto; }
-    #main { flex:1; display:flex; flex-direction:column; background:var(--chat-bg); border-radius:12px; overflow:hidden; box-shadow:0 4px 20px rgba(0,0,0,.08); }
+    #app { display:flex; width:100vw; height:100vh; }
+    #main { flex:9; display:flex; flex-direction:column; background:var(--chat-bg); border-radius:12px; overflow:hidden; box-shadow:0 4px 20px rgba(0,0,0,.08); }
     header { background:var(--primary); color:#fff; padding:12px 16px; font-weight:600; font-size:1.1rem; }
     #chat { flex:1; padding:12px; overflow-y:auto; background:#0e0e10; color:#ffffff; font-family: 'Courier New', monospace; font-size:14px; line-height:1.4; }
     .msg { margin:2px 0; }
@@ -46,7 +46,7 @@
         transform: scale(1.5);
       }
     /* Sidebar */
-    #sidebar { width:220px; background:var(--user-bg); border-left:1px solid #ddd; padding:12px; }
+    #sidebar { flex:1; background:var(--user-bg); border-left:1px solid #ddd; padding:12px; }
     #sidebar h3 { margin:0 0 12px; font-size:0.9rem; text-transform:uppercase; color:var(--muted); letter-spacing:0.5px; }
     #userList { list-style:none; padding:0; margin:0; }
     #userList li { padding:6px 8px; border-radius:8px; margin:4px 0; font-size:0.9rem; display:flex; align-items:center; gap:8px; background:#2a2a2e; color:#ffffff; }
@@ -68,12 +68,16 @@
       <div id="typing"></div>
       <div id="inputRow">
         <div id="emoteBar">
-          <button class="emote-btn" onclick="insertEmote('PogChamp')">PogChamp</button>
-          <button class="emote-btn" onclick="insertEmote('Kappa')">Kappa</button>
-          <button class="emote-btn" onclick="insertEmote('LUL')">LUL</button>
-          <button class="emote-btn" onclick="insertEmote('OMEGALUL')">OMEGALUL</button>
-          <button class="emote-btn" onclick="insertEmote('PepeLaugh')">PepeLaugh</button>
-          <button class="emote-btn" onclick="insertEmote('monkaS')">monkaS</button>
+          <button class="emote-btn" onclick="quickSend('RainTime')">RainTime</button>
+          <button class="emote-btn" onclick="quickSend('PETPET')">PETPET</button>
+          <button class="emote-btn" onclick="quickSend('ppL')">ppL</button>
+          <button class="emote-btn" onclick="quickSend('Clap')">Clap</button>
+          <button class="emote-btn" onclick="quickSend('PepePls')">PepePls</button>
+          <button class="emote-btn" onclick="quickSend('peepoHappy')">peepoHappy</button>
+          <button class="emote-btn" onclick="quickSend('peepoSad')">peepoSad</button>
+          <button class="emote-btn" onclick="quickSend('FeelsDankMan')">FeelsDankMan</button>
+          <button class="emote-btn" onclick="quickSend('BillyApprove')">BillyApprove</button>
+          <button class="emote-btn" onclick="quickSend('forsenPls')">forsenPls</button>
         </div>
         <div id="inputAndSend">
           <input id="input" placeholder="Type a message…" autocomplete="off" />
@@ -183,8 +187,9 @@
     });
 
     socket.on("message", data => {
-      // Show all final messages. For the user's own messages we already add them locally,
-      // but we'll still append server echoes to keep state consistent.
+      // Skip the final message for AI Assistant since it's already shown via streaming
+      if (data.user === "AI Assistant") return;
+      // Show all other final messages
       const isBot = data.user !== userName;
       console.log("Received message", data);
       addMessage(data.user, data.text, isBot);
@@ -299,6 +304,10 @@
       input.focus();
     }
 
+    function quickSend(emote) {
+      input.value = emote;
+      send();
+    }
     function parseEmotes(text) {
       // Replace emote names with img tags using the downloaded filenames
       const emoteMap = seventvEmotes || window.emotes || {};
