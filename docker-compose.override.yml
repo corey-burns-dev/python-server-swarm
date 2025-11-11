@@ -1,0 +1,36 @@
+# docker-compose.override.yml
+# Local development overrides - automatically loaded by docker-compose
+# Use this for local development without modifying docker-compose.yml
+
+version: '3.8'
+
+services:
+  server:
+    # Mount local source for live code changes
+    volumes:
+      - ./server.py:/app/server.py
+      - ./personas.py:/app/personas.py
+      - ./requirements.txt:/app/requirements.txt
+    # Expose Flask debug mode for local development
+    environment:
+      - FLASK_DEBUG=1
+      - FLASK_ENV=development
+    # Build from local directory
+    build:
+      context: .
+      target: server
+
+  bot_swarm:
+    # Mount local source for live code changes
+    volumes:
+      - ./bot_swarm.py:/app/bot_swarm.py
+      - ./personas.py:/app/personas.py
+      - ./requirements.txt:/app/requirements.txt
+    # Explicit environment for local testing
+    environment:
+      - SERVER_URL=http://server:5000
+      - NUM_BOTS=3
+    # Build from local directory
+    build:
+      context: .
+      target: swarm

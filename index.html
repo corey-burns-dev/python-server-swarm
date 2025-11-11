@@ -92,7 +92,7 @@
     </aside>
   </div>
 
-  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+  <script src="./static/socket.io.min.js"></script>
   <script>
   // Use server origin when served, otherwise fall back to localhost for file:// loads
   const SERVER_URL = 'http://localhost:5000';
@@ -165,6 +165,14 @@
     socket.on("error", d => addSystem(`Error: ${d.message}`));
 
     socket.on("user_joined", data => {
+      // If the event refers to the local user, ignore the system message
+      // because we already show "You joined as ..." on connect.
+      if (data.user === userName) {
+        onlineUsers.add(data.user);
+        updateUserList();
+        return;
+      }
+
       onlineUsers.add(data.user);
       updateUserList();
       addSystem(`${escape(data.user)} joined the room`);
@@ -253,7 +261,6 @@
       if (!text) return;
       input.value = "";
       socket.emit("stop_typing", {room: ROOM_ID, user: userName});
-      addMessage(userName, text, false);
       console.log("emitting message", {sid, text, room: ROOM_ID, user: userName});
       socket.emit("message", {sid, text, room: ROOM_ID, user: userName});
     }

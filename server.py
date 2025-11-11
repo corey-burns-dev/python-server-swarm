@@ -1,263 +1,252 @@
-# server.py
-import os
-import json
-import requests
-import aiohttp
-import subprocess
-from flask import Flask, request, send_from_directory
+from flask import Flask, render_template, request, send_from_directory, jsonify
 from flask_socketio import SocketIO, emit, join_room, leave_room
-from collections import defaultdict
-
-# ----------------------------------------------------------------------
-# Config
-# ----------------------------------------------------------------------
-LM_API = os.getenv("LM_API", "http://localhost:1234/v1/chat/completions")
-MODEL = os.getenv("LM_MODEL", "lmstudio-community/Meta-Llama-3-8B-Instruct")
+from flask_cors import CORS
+import json
+import os
+import time
+import random
 
 app = Flask(__name__)
-app.config["SECRET_KEY"] = "dev"
-socketio = SocketIO(app, cors_allowed_origins="*")
+CORS(app, origins="*")
+
+# Use threading for Python 3.13 compatibility
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
 # Global state
-conversations = {}                    # sid → message history
-online_users = defaultdict(set)       # room → set of usernames
-socket_data = {}                      # sid → {room, user}
+rooms = {}  # room_id -> {users: set(), messages: list()}
+user_sessions = {}  # sid -> {user: str, room: str, last_seen: float}
+EMOTE_MAP = {}
 
-# ----------------------------------------------------------------------
-# 7TV Emotes
-# ----------------------------------------------------------------------
-SEVENTV_EMOTES = {}  # name -> id
+# Load emote map if available
+try:
+    emotes_path = os.path.join(os.path.dirname(__file__), 'emotes', 'emotes.json')
+    if os.path.exists(emotes_path):
+        with open(emotes_path, 'r', encoding='utf-8') as f:
+            EMOTE_MAP = json.load(f)
+            print(f"Loaded {len(EMOTE_MAP)} emotes from emotes/emotes.json")
+    else:
+        print("No emotes/emotes.json found; clients will receive empty emote map")
+except Exception as e:
+    print(f"Error loading emote map: {e}")
 
-def load_7tv_emotes():
-    global SEVENTV_EMOTES
+@app.route('/')
+def index():
+    # Prefer templates/index.html when present (Flask templates directory);
+    # if not, serve the project's root `index.html` directly so the static
+    # single-file client works when run from source.
+    templates_dir = os.path.join(os.path.dirname(__file__), 'templates', 'index.html')
+    if os.path.exists(templates_dir):
+        return render_template('index.html')
+    root = os.path.dirname(__file__)
+    return send_from_directory(root, 'index.html')
+
+
+# Serve emote image files from the emotes directory
+@app.route('/emotes/<path:filename>')
+def emote_file(filename):
+    emotes_dir = os.path.join(os.path.dirname(__file__), 'emotes')
+    return send_from_directory(emotes_dir, filename)
+
+
+# Provide the emote mapping as JSON at a stable URL for debugging
+@app.route('/emotes.json')
+def emote_map():
+    # Debug: log request info to help diagnose external 404s
     try:
-        with open('emotes/emotes.json', 'r') as f:
-            SEVENTV_EMOTES = json.load(f)
-        print(f"Loaded {len(SEVENTV_EMOTES)} emotes from local file")
-    except FileNotFoundError:
-        print("emotes.json not found, using fallback")
-        SEVENTV_EMOTES = {
-            "PogChamp": "01FAGRADQ00008E6R5BC5KRVKP.webp",
-            "Kappa": "01FAGRAEQ00008E6R5BC5KRVKR.webp",
-            "LUL": "01FAGRADQ00008E6R5BC5KRVKR.webp",
-            "OMEGALUL": "01FAGRADQ00008E6R5BC5KRVKS.webp",
-            "PepeLaugh": "01FAGRADQ00008E6R5BC5KRVKT.webp",
-            "monkaS": "01FAGRADQ00008E6R5BC5KRVKU.webp"
-        }
-    except Exception as e:
-        print(f"Error loading emotes: {e}")
-        SEVENTV_EMOTES = {
-            "PogChamp": "01FAGRADQ00008E6R5BC5KRVKP.webp",
-            "Kappa": "01FAGRAEQ00008E6R5BC5KRVKR.webp",
-            "LUL": "01FAGRADQ00008E6R5BC5KRVKR.webp",
-            "OMEGALUL": "01FAGRADQ00008E6R5BC5KRVKS.webp",
-            "PepeLaugh": "01FAGRADQ00008E6R5BC5KRVKT.webp",
-            "monkaS": "01FAGRADQ00008E6R5BC5KRVKU.webp"
-        }
-
-    # Run download-7tv.js to download emotes locally
-    try:
-        print("Running download-7tv.js...")
-        subprocess.run(['node', 'download-7tv.js'], check=True, timeout=60)
-        print("Emotes downloaded successfully")
-        # Reload after download
-        try:
-            with open('emotes/emotes.json', 'r') as f:
-                SEVENTV_EMOTES = json.load(f)
-            print(f"Reloaded {len(SEVENTV_EMOTES)} emotes after download")
-        except:
-            pass
-    except subprocess.CalledProcessError as e:
-        print(f"download-7tv.js failed: {e}")
-    except FileNotFoundError:
-        print("download-7tv.js not found, skipping download")
-    except subprocess.TimeoutExpired:
-        print("download-7tv.js timed out")
-
-# ----------------------------------------------------------------------
-@socketio.on("connect")
-def on_connect():
-    sid = request.sid
-    print(f"[CONNECT] Client {sid}")
-    emit("emotes", SEVENTV_EMOTES)
-    emit("status", {"message": "Connected to server."})
-
-# ----------------------------------------------------------------------
-@socketio.on("join")
-def handle_join(data):
-    room = data.get("room")
-    user = data.get("user")
-    sid = request.sid
-
-    if not room or not user:
-        emit("error", {"message": "Missing room or user"})
-        return
-
-    join_room(room)
-    socket_data[sid] = {"room": room, "user": user}
-    online_users[room].add(user)
-
-    print(f"[JOIN] {user} → {room}")
-    # Tell everyone a user joined
-    emit("user_joined", {"user": user}, room=room)
-    emit("status", {"message": f"{user} joined"}, room=room)
-    # Send the current user list to the newly-joined client so they see existing users (including bots)
-    try:
-        emit("user_list", {"users": list(online_users[room])}, to=sid)
+        print('emote_map request:', request.method, request.path, dict(request.headers))
     except Exception:
-        # fallback: emit without explicit target
-        emit("user_list", {"users": list(online_users[room])})
+        pass
+    return jsonify(EMOTE_MAP)
 
-# ----------------------------------------------------------------------
-@socketio.on("disconnect")
+@socketio.on('connect')
+def handle_connect():
+    print(f"Client connected: {request.sid}")
+    user_sessions[request.sid] = {
+        'user': None,
+        'room': None,
+        'last_seen': time.time()
+    }
+    # Send emote mapping to client so it can render emotes
+    try:
+        emit('emotes', EMOTE_MAP)
+    except Exception:
+        # emit may not be available in some contexts; ignore failures
+        pass
+
+@socketio.on('disconnect')
 def handle_disconnect():
-    sid = request.sid
-    data = socket_data.get(sid)
-    if not data:
+    print(f"Client disconnected: {request.sid}")
+    session = user_sessions.get(request.sid)
+    if session and session['room'] and session['user']:
+        room_id = session['room']
+        user = session['user']
+        if room_id in rooms and user in rooms[room_id]['users']:
+            rooms[room_id]['users'].remove(user)
+            emit('user_left', {'user': user}, room=room_id)
+            print(f"User {user} left room {room_id}")
+    if request.sid in user_sessions:
+        del user_sessions[request.sid]
+
+@socketio.on('start')
+def handle_start(data):
+    """Initialize session"""
+    sid = data.get('sid')
+    system = data.get('system', '')
+    user_sessions[request.sid]['system'] = system
+    print(f"Session started for {request.sid}: {system}")
+
+@socketio.on('join')
+def handle_join(data):
+    room_id = data.get('room')
+    user = data.get('user')
+
+    if not room_id or not user:
+        emit('error', {'message': 'Room and user required'})
         return
 
-    room = data["room"]
-    user = data["user"]
+    # Leave current room if any
+    session = user_sessions.get(request.sid)
+    if session and session['room']:
+        old_room = session['room']
+        if old_room in rooms and session['user'] in rooms[old_room]['users']:
+            rooms[old_room]['users'].remove(session['user'])
+            emit('user_left', {'user': session['user']}, room=old_room)
 
-    leave_room(room)
-    online_users[room].discard(user)
-    if not online_users[room]:
-        del online_users[room]
+    # Join new room
+    join_room(room_id)
+    session = user_sessions[request.sid]
+    session['user'] = user
+    session['room'] = room_id
+    session['last_seen'] = time.time()
 
-    del socket_data[sid]
-    print(f"[LEAVE] {user} left {room}")
-    emit("user_left", {"user": user}, room=room)
+    # Initialize room if needed
+    if room_id not in rooms:
+        rooms[room_id] = {'users': set(), 'messages': []}
 
-# ----------------------------------------------------------------------
-@socketio.on("start")
-def on_start(data):
-    sid = data.get("sid") or request.sid
-    system = data.get("system", "You are a helpful assistant.")
-    conversations[sid] = [{"role": "system", "content": system}]
-    emit("status", {"message": "Conversation started."})
+    rooms[room_id]['users'].add(user)
 
-# ----------------------------------------------------------------------
-@socketio.on("typing")
-def handle_typing(data):
-    sid = request.sid
-    info = socket_data.get(sid)
-    if info:
-        # Broadcast to **everyone except the typer** (they already show their own)
-        emit("typing", {"user": info["user"]}, room=info["room"], include_self=False)
+    # Send room history
+    emit('room_history', {
+        'messages': rooms[room_id]['messages'][-50:],  # Last 50 messages
+        'users': list(rooms[room_id]['users'])
+    })
 
-@socketio.on("stop_typing")
-def handle_stop_typing(data):
-    sid = request.sid
-    info = socket_data.get(sid)
-    if info:
-        emit("stop_typing", {"user": info["user"]}, room=info["room"], include_self=False)
+    # Ensure the joining client receives the emote mapping (avoid connect-time races)
+    try:
+        emit('emotes', EMOTE_MAP, room=request.sid)
+    except Exception:
+        pass
 
-# ----------------------------------------------------------------------
-@socketio.on("message")
-def on_message(data):
-    sid = request.sid
-    user_text = data.get("text", "").strip()
-    room = data.get("room")
-    user = data.get("user")
+    # Notify others
+    emit('user_joined', {'user': user}, room=room_id, skip_sid=request.sid)
+    emit('joined', {'room': room_id, 'user': user})
 
-    # Validate session
-    info = socket_data.get(sid)
-    if not info or info["room"] != room or info["user"] != user:
-        emit("error", {"message": "Invalid session"}, to=sid)
+    print(f"User {user} joined room {room_id}")
+
+@socketio.on('leave')
+def handle_leave():
+    session = user_sessions.get(request.sid)
+    if session and session['room'] and session['user']:
+        room_id = session['room']
+        user = session['user']
+        leave_room(room_id)
+        if room_id in rooms and user in rooms[room_id]['users']:
+            rooms[room_id]['users'].remove(user)
+            emit('user_left', {'user': user}, room=room_id)
+        session['room'] = None
+        emit('left')
+
+@socketio.on('message')
+def handle_message(data):
+    user = data.get('user')
+    text = data.get('text')
+    room_id = data.get('room')
+
+    if not user or not text or not room_id:
+        emit('error', {'message': 'User, text, and room required'})
         return
-    if not user_text:
-        return
 
-    # Check for AI trigger
-    ai_trigger = False  # AI muted - only bots chat
+    # Update session
+    session = user_sessions.get(request.sid)
+    if session:
+        session['last_seen'] = time.time()
 
-    if not ai_trigger:
-        # Don't respond
-        return
-
-    # Append user message
-    messages = conversations.setdefault(sid, [{"role": "system", "content": "You are a helpful assistant."}])
-    messages.append({"role": "user", "content": user_text})
-
-    # Call LM with streaming
-    payload = {
-        "model": MODEL,
-        "messages": messages,
-        "temperature": 0.7,
-        "stream": True
+    # Create message
+    message = {
+        'user': user,
+        'text': text,
+        'timestamp': time.time(),
+        'id': f"{user}_{int(time.time() * 1000)}"
     }
 
-    try:
-        with requests.post(LM_API, json=payload, stream=True) as r:
-            r.raise_for_status()
-            full_reply = []
+    # Store in room history
+    if room_id in rooms:
+        rooms[room_id]['messages'].append(message)
+        # Keep only last 200 messages
+        if len(rooms[room_id]['messages']) > 200:
+            rooms[room_id]['messages'] = rooms[room_id]['messages'][-200:]
 
-            for line in r.iter_lines(decode_unicode=True):
-                if not line or not line.startswith("data:"):
-                    continue
-                if line.strip() == "data: [DONE]":
-                    break
-                try:
-                    chunk = json.loads(line[len("data:"):].strip())
-                    delta = chunk["choices"][0]["delta"].get("content", "")
-                    if delta:
-                        full_reply.append(delta)
-                        # STREAM TO **EVERYONE IN THE ROOM** (not just sender)
-                        emit("stream", {"token": delta}, room=room)
-                except Exception as e:
-                    print(f"Stream parse error: {e}")
+    # Broadcast to room
+    emit('message', message, room=room_id)
+    print(f"Message from {user} in {room_id}: {text}")
 
-            reply_text = "".join(full_reply).strip()
-            if not reply_text:
-                reply_text = "(no response)"
+@socketio.on('bot_message')
+def handle_bot_message(data):
+    """Handle messages from bots"""
+    user = data.get('user')
+    text = data.get('text')
+    room_id = data.get('room')
 
-            messages.append({"role": "assistant", "content": reply_text})
-
-            # Signal end of streaming
-            emit("done", room=room)
-
-            # BROADCAST FINAL MESSAGE TO WHOLE ROOM
-            emit("message", {"user": "AI Assistant", "text": reply_text}, room=room)
-
-    except requests.RequestException as e:
-        error_msg = f"LM request failed: {e}"
-        print(error_msg)
-        emit("error", {"message": error_msg}, to=sid)
-
-# ----------------------------------------------------------------------
-@socketio.on("bot_message")
-def on_bot_message(data):
-    user = data.get("user")
-    text = data.get("text", "").strip()
-    room = data.get("room")
-
-    if not user or not text or not room:
+    if not user or not text or not room_id:
         return
 
-    # Broadcast to room without calling LM
-    emit("message", {"user": user, "text": text}, room=room)
+    # Create message
+    message = {
+        'user': user,
+        'text': text,
+        'timestamp': time.time(),
+        'id': f"bot_{user}_{int(time.time() * 1000)}",
+        'is_bot': True
+    }
 
-# ----------------------------------------------------------------------
-@app.route("/")
-def index():
-    return send_from_directory(".", "index.html")
+    # Store in room history
+    if room_id in rooms:
+        rooms[room_id]['messages'].append(message)
+        if len(rooms[room_id]['messages']) > 200:
+            rooms[room_id]['messages'] = rooms[room_id]['messages'][-200:]
 
-# ----------------------------------------------------------------------
-# Emote serving
-# ----------------------------------------------------------------------
-@app.route('/emotes/<path:filename>')
-def serve_emote(filename):
-    return send_from_directory('emotes', filename)
+    # Broadcast to room
+    emit('message', message, room=room_id)
+    print(f"Bot message from {user} in {room_id}: {text}")
 
-# ----------------------------------------------------------------------
-@app.route('/socket.io.js')
-def serve_socketio():
-    response = send_from_directory('static', 'socket.io.min.js')
-    response.headers['X-Content-Type-Options'] = 'nosniff'
-    return response
+@socketio.on('typing')
+def handle_typing(data):
+    room_id = data.get('room')
+    user = data.get('user')
+    if room_id and user:
+        emit('typing', {'user': user}, room=room_id, skip_sid=request.sid)
 
-# ----------------------------------------------------------------------
-if __name__ == "__main__":
-    load_7tv_emotes()
-    print("Starting Flask-SocketIO server on http://0.0.0.0:5000")
-    socketio.run(app, host="0.0.0.0", port=5000)
+@socketio.on('stop_typing')
+def handle_stop_typing(data):
+    room_id = data.get('room')
+    user = data.get('user')
+    if room_id and user:
+        emit('stop_typing', {'user': user}, room=room_id, skip_sid=request.sid)
+
+@socketio.on('ping')
+def handle_ping():
+    """Keep-alive ping"""
+    session = user_sessions.get(request.sid)
+    if session:
+        session['last_seen'] = time.time()
+    emit('pong')
+
+# Health check endpoint
+@app.route('/health')
+def health():
+    return {'status': 'healthy', 'rooms': len(rooms), 'sessions': len(user_sessions)}
+
+if __name__ == '__main__':
+    port = int(os.getenv('PORT', 5000))
+    print(f"Starting server on port {port}")
+    socketio.run(app, host='0.0.0.0', port=port, debug=False, allow_unsafe_werkzeug=True)
